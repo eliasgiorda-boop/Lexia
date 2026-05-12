@@ -1,0 +1,42 @@
+﻿# ===== SECRETOS - NUNCA SUBIR =====
+.env
+*.key
+*secret*
+*credentials*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# ===== Datos pesados (no van al repo) =====
+data/chromadb/
+data/samples/
+data/corpus/
+*.txt
+*.pdf
+!README*.txt
+!README*.pdf
+
+# ===== IDEs =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Sistema =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Logs =====
+*.log
+logs/
