@@ -106,20 +106,26 @@ def extract_articles(cuerpo_limpio: str) -> list:
             end = matches[i + 1].start()
         else:
             end = len(cuerpo_limpio)
-            texto_ultimo = cuerpo_limpio[start:end]
-            match_dada = re.search(
-                r"\n\s*Dada\s+en\s+la\s+[Ss]ala\s+de\s+[Ss]esiones",
-                texto_ultimo
-            )
-            if match_dada:
-                end = start + match_dada.start()
+
+        # Corte de la clausula formal "Dada en la Sala de Sesiones..." 
+        # Aplicado SIEMPRE, no solo al ultimo articulo
+        texto_articulo_tmp = cuerpo_limpio[start:end]
+        match_dada = re.search(
+            r"\n\s*Dada\s+en\s+la\s+[Ss]ala\s+de\s+[Ss]esiones",
+            texto_articulo_tmp
+        )
+        if match_dada:
+            end = start + match_dada.start()
         
         texto_articulo = cuerpo_limpio[start:end]
-        match_anexo = re.search(r"\n\s*ANEXO\s+[IVX]+\s*\n", texto_articulo, re.IGNORECASE)
+        match_anexo = re.search(r"\n\s*(ANEXO\s+[IVX]+)\s*\n", texto_articulo, re.IGNORECASE)
         if match_anexo:
-            end = start + match_anexo.start()
-        
+            label_anexo = match_anexo.group(1).strip()
+            end = start + match_anexo.end()
+
         texto_completo = cuerpo_limpio[start:end].strip()
+        texto_completo = re.sub(r"\n\s*(ANEXO\s+[IVX]+)\s*$", r" \1", texto_completo, flags=re.IGNORECASE)
+        
         texto_sin_label = patron_articulo.sub("", texto_completo, count=1).strip()
         texto_sin_label = re.sub(r"^[\.\-\s]+", "", texto_sin_label)
         
