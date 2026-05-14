@@ -67,6 +67,14 @@ def clean_body(texto: str) -> str:
     match_slogan = re.search(slogan_pattern, cuerpo)
     if match_slogan:
         cuerpo = cuerpo[:match_slogan.start()]
+
+    # Eliminar clausula formal "Dada en la Sala/Deliberaciones" siempre,
+    # preservando lo que viene despues (incluyendo ANEXOS).
+    cuerpo = re.sub(
+        r"\n\s*Dada\s+en\s+la\s+[Ss]ala\s+de\s+([Ss]esiones|[Dd]eliberaciones)[^\n]*",
+        "",
+        cuerpo
+    )
     
     lineas_ruido = {
         "Volver", "Digesto Municipal", "Versión para Imprimir",

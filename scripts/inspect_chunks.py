@@ -1,18 +1,24 @@
 """
-Inspector cualitativo de chunks del piloto.
+Inspector cualitativo de chunks del piloto - v2 con heuristicas refinadas.
 
-Genera un reporte navegable en Markdown para validacion HUMANA.
-La idea: leer ~80 chunks estratificados con criterio juridico y detectar
-problemas antes de gastar plata en embeddings.
+Mejoras respecto a la v1:
 
-Tres tipos de muestra:
-  1. Estratificada por tipo_chunk (representa cada camino del chunker)
-  2. Caso conocido con bug: art_8 fusionado de ordenanza_10328_2014
-  3. Sospechosos detectados automaticamente (cortes mid-word, tamaño raro, etc)
+  1. Los sub-chunks con overlap (articulo_largo_parte, anexo_parte con parte>1)
+     NO se marcan como sospechosos por arrancar/terminar mid-word: ESE es su
+     diseño esperado (el overlap protege contra el corte).
+
+  2. Solo chequeamos mid-word en chunks que deberian estar semanticamente
+     completos: articulo, anexo (no _parte), doc_completo.
+
+  3. Las heuristicas mid-word son mas estrictas: solo flaguean firma clara
+     de corte (palabras de 1-3 chars no comunes al inicio, palabras de 1-2
+     chars al final sin signo de puntuacion).
+
+  4. Se mantiene la deteccion de basura del scraper.
 
 Salidas:
-  data/samples/pilot/_inspection_report.md   <- abrirlo en VSCode/cualquier editor
-  data/samples/pilot/_inspection_report.json <- versión estructurada por si la necesitas
+  data/samples/pilot/_inspection_report.md
+  data/samples/pilot/_inspection_report.json
 """
 import json
 import random
@@ -28,10 +34,8 @@ CHUNKS_PATH = PILOT_DIR / "_chunks.json"
 REPORT_MD = PILOT_DIR / "_inspection_report.md"
 REPORT_JSON = PILOT_DIR / "_inspection_report.json"
 
-# Reproducibilidad
 SEED = 42
 
-# Cuotas por tipo_chunk (estratificacion)
 CUOTAS = {
     "articulo": 15,
     "articulo_largo_parte": 10,
@@ -41,35 +45,70 @@ CUOTAS = {
     "fallback_caracteres": 8,
 }
 
+# Tipos de chunk que DEBERIAN ser semanticamente completos
+TIPOS_COMPLETOS = {"articulo", "anexo", "doc_completo"}
 
-def empieza_mid_word(texto: str) -> bool:
-    """True si el chunk arranca con un fragmento de palabra (no MAYUSCULA, no signo)."""
+
+def es_subchunk_intermedio(chunk):
+    """True si es parte >1 de una serie con overlap (corte intencional)."""
+    tipo = chunk["metadata"]["tipo_chunk"]
+    if tipo not in ("articulo_largo_parte", "anexo_parte", "fallback_caracteres"):
+        return False
+    parte = chunk["metadata"].get("parte")
+    return parte is not None and parte > 1
+
+
+def empieza_mid_word_estricto(texto):
+    """
+    True solo si el chunk arranca con firma clara de corte:
+    palabra corta (1-3 chars) en minuscula NO comun, seguida de espacio.
+    """
     if not texto:
         return False
-    primer_char = texto.lstrip()[:1]
-    if not primer_char:
+    texto = texto.lstrip()
+    if not texto or not texto[0].islower():
         return False
-    # Si arranca con minuscula, probablemente es mid-word
-    # (excepto palabras que legítimamente empiezan en minuscula, raras al inicio)
-    return primer_char.islower()
+
+    m = re.match(r"^([a-záéíóúñü]+)", texto, re.IGNORECASE)
+    if not m:
+        return False
+
+    primera = m.group(1).lower()
+    palabras_comunes = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas",
+        "de", "del", "en", "por", "para", "que", "se", "su", "sus",
+        "al", "lo", "le", "les", "me", "te", "no", "si",
+        "con", "sin", "y", "o", "u", "e", "es", "son", "ser",
+    }
+    if primera in palabras_comunes:
+        return False
+
+    return len(primera) <= 3
 
 
-def termina_mid_word(texto: str) -> bool:
-    """True si el chunk termina cortado a mitad de palabra."""
+def termina_mid_word_estricto(texto):
+    """True solo si hay firma clara de corte al final."""
     if not texto:
         return False
     texto = texto.rstrip()
     if not texto:
         return False
-    # Si el ultimo char es letra (no signo, no espacio), probablemente mid-word
-    ultimo = texto[-1]
-    if ultimo in '.,;:!?)"\']}>-—…':
+
+    if texto[-1] in '.,;:!?)"\']}>-—…':
         return False
-    return ultimo.isalpha()
+    if texto[-1].isdigit():
+        return False
+
+    m = re.search(r"([a-záéíóúñü]+)$", texto, re.IGNORECASE)
+    if not m:
+        return False
+
+    ultima = m.group(1)
+    return len(ultima) <= 2
 
 
-def tiene_basura_scraper(texto: str) -> list:
-    """Devuelve lista de marcadores de basura encontrada en el chunk."""
+def tiene_basura_scraper(texto):
+    """Devuelve lista de marcadores de basura."""
     basura = []
     marcadores = [
         ("Volver", r"\bVolver\b"),
@@ -78,7 +117,8 @@ def tiene_basura_scraper(texto: str) -> list:
         ("Información Adicional", r"Informaci[óo]n Adicional"),
         ("Zona no Nuclear (slogan)", r"Zona no Nuclear"),
         ("HTML tags", r"<[a-z]+[^>]*>"),
-        ("Mojibake clásico", r"Ã[©³­¡]"),
+        ("Mojibake", r"Ã[©³­¡]"),
+        ("Dada en la Sala (colado)", r"Dada en la Sala de Sesiones"),
     ]
     for nombre, patron in marcadores:
         if re.search(patron, texto, re.IGNORECASE):
@@ -86,52 +126,51 @@ def tiene_basura_scraper(texto: str) -> list:
     return basura
 
 
-def es_chunk_sospechoso(chunk: dict) -> list:
-    """Devuelve lista de razones por las que el chunk podria tener problemas."""
+def es_chunk_sospechoso(chunk):
+    """Devuelve lista de razones de sospecha."""
     razones = []
     texto = chunk["texto"]
     chars = chunk["metadata"]["char_count"]
+    tipo = chunk["metadata"]["tipo_chunk"]
 
     if not texto.strip():
         razones.append("texto_vacio")
         return razones
 
-    if empieza_mid_word(texto):
-        razones.append("empieza_mid_word")
-
-    if termina_mid_word(texto):
-        razones.append("termina_mid_word")
+    # Mid-word solo en chunks que deberian ser completos
+    if tipo in TIPOS_COMPLETOS:
+        if empieza_mid_word_estricto(texto):
+            razones.append("empieza_mid_word_estricto")
+        if termina_mid_word_estricto(texto):
+            razones.append("termina_mid_word_estricto")
 
     basura = tiene_basura_scraper(texto)
     if basura:
         razones.append(f"basura: {','.join(basura)}")
 
-    # Tamano anomalo
-    if chars < 30:
+    if chars < 20:
         razones.append(f"muy_corto ({chars} chars)")
     if chars > 2500:
         razones.append(f"muy_largo ({chars} chars)")
 
-    # Articulos sin contenido sustantivo (solo el verbo o frase corta)
-    if chunk["metadata"]["tipo_chunk"] == "articulo" and chars < 60:
+    if tipo == "articulo" and chars < 30:
         razones.append("articulo_minusculo")
 
-    # Si dice "como" o termina en preposicion, probable truncado por ANEXO
-    if texto.rstrip().endswith(" como") or texto.rstrip().endswith(" como:"):
-        razones.append("termina_en_'como'_probable_truncado_por_anexo")
+    if texto.rstrip().lower().endswith(" como"):
+        razones.append("termina_en_'como'_truncado_por_anexo")
 
     return razones
 
 
-def formatear_chunk_md(chunk: dict, motivo: str = "") -> str:
-    """Formatea un chunk como bloque markdown navegable."""
+def formatear_chunk_md(chunk, motivo=""):
+    """Formatea un chunk como bloque markdown."""
     meta = chunk["metadata"]
     sospechas = es_chunk_sospechoso(chunk)
 
     lineas = []
     lineas.append(f"### `{chunk['chunk_id']}`")
     if motivo:
-        lineas.append(f"\n**Motivo de inclusión:** {motivo}")
+        lineas.append(f"\n**Motivo:** {motivo}")
     lineas.append(f"\n**Metadata:**")
     lineas.append(f"- `tipo_chunk`: {meta.get('tipo_chunk')}")
     lineas.append(f"- `doc_id`: {meta.get('doc_id')}")
@@ -147,11 +186,10 @@ def formatear_chunk_md(chunk: dict, motivo: str = "") -> str:
     lineas.append(f"- `url_origen`: {meta.get('url_origen')}")
 
     if sospechas:
-        lineas.append(f"\n**⚠️ Sospechas automaticas:** {', '.join(sospechas)}")
+        lineas.append(f"\n**⚠️ Sospechas:** {', '.join(sospechas)}")
 
-    lineas.append(f"\n**Texto del chunk:**\n")
+    lineas.append(f"\n**Texto:**\n")
     lineas.append("```")
-    # Truncar a 3000 chars para que el reporte no sea inmanejable
     texto = chunk["texto"]
     if len(texto) > 3000:
         texto = texto[:3000] + f"\n\n[... TEXTO TRUNCADO, hay {len(chunk['texto']) - 3000} chars mas ...]"
@@ -164,7 +202,7 @@ def formatear_chunk_md(chunk: dict, motivo: str = "") -> str:
 
 def main():
     print("=" * 70)
-    print("INSPECCION CUALITATIVA DE CHUNKS DEL PILOTO")
+    print("INSPECCION CUALITATIVA DE CHUNKS - v2 (heuristicas refinadas)")
     print("=" * 70)
 
     if not CHUNKS_PATH.exists():
@@ -178,7 +216,7 @@ def main():
 
     rng = random.Random(SEED)
 
-    # ===== 1. Muestreo estratificado por tipo_chunk =====
+    # Muestreo estratificado
     print("\n[1/3] Muestreo estratificado por tipo_chunk...")
     por_tipo = defaultdict(list)
     for c in all_chunks:
@@ -189,54 +227,49 @@ def main():
         disponibles = por_tipo.get(tipo, [])
         n = min(cuota, len(disponibles))
         if n > 0:
-            seleccion = rng.sample(disponibles, n)
-            muestra_estratificada.extend(seleccion)
-        print(f"  {tipo:25}: {n}/{cuota} (de {len(disponibles)} disponibles)")
+            muestra_estratificada.extend(rng.sample(disponibles, n))
+        print(f"  {tipo:25}: {n}/{cuota} (de {len(disponibles)})")
 
-    # ===== 2. Caso conocido: chunks del falso positivo fusionado =====
-    print("\n[2/3] Caso conocido: ordenanza_10328_2014 (filtro de falso positivo)...")
+    # Caso conocido
+    print("\n[2/3] Caso conocido: ordenanza_10328_2014...")
     caso_conocido = [c for c in all_chunks
                      if c["metadata"]["doc_id"] == "ordenanza_10328_2014"]
     print(f"  {len(caso_conocido)} chunks de este doc en el piloto.")
 
-    # ===== 3. Sospechosos por deteccion automatica =====
-    print("\n[3/3] Buscando chunks sospechosos automaticamente...")
+    # Sospechosos refinados
+    print("\n[3/3] Buscando sospechosos (heuristicas refinadas)...")
     sospechosos = []
     for c in all_chunks:
         razones = es_chunk_sospechoso(c)
         if razones:
             sospechosos.append((c, razones))
 
-    # Top 30 sospechosos, priorizando los mas graves
     def gravedad(item):
         c, razones = item
         score = 0
         if any("vacio" in r for r in razones): score += 100
         if any("basura" in r for r in razones): score += 50
-        if any("truncado_por_anexo" in r for r in razones): score += 40
+        if any("truncado" in r for r in razones): score += 40
         if any("mid_word" in r for r in razones): score += 20
-        if any("anomalo" in r or "muy_corto" in r or "muy_largo" in r for r in razones): score += 10
+        if any("muy_corto" in r or "muy_largo" in r for r in razones): score += 10
         return -score
 
     sospechosos.sort(key=gravedad)
     sospechosos_top = sospechosos[:30]
-    print(f"  Total sospechosos encontrados: {len(sospechosos)}")
-    print(f"  Tomando top {len(sospechosos_top)} por gravedad.")
+    print(f"  Total sospechosos: {len(sospechosos)} ({round(len(sospechosos)/len(all_chunks)*100,1)}%)")
+    print(f"  Top a revisar: {len(sospechosos_top)}")
 
-    # ===== Generar reporte markdown =====
+    # Generar reporte
     print(f"\nGenerando reporte en {REPORT_MD}...")
 
     md = []
-    md.append("# Inspección cualitativa de chunks del piloto\n")
-    md.append(f"**Total chunks revisados:** {len(muestra_estratificada) + len(caso_conocido) + len(sospechosos_top)}")
-    md.append(f"\n**Tabla de contenidos:**\n")
+    md.append("# Inspección cualitativa de chunks - v2\n")
+    md.append(f"**Total a revisar:** "
+              f"{len(muestra_estratificada) + len(caso_conocido) + len(sospechosos_top)}\n")
+    md.append("\n**Tabla de contenidos:**\n")
     md.append("1. [Muestra estratificada](#1-muestra-estratificada-por-tipo_chunk)")
-    md.append("2. [Caso conocido: ordenanza_10328_2014](#2-caso-conocido-ordenanza_10328_2014)")
-    md.append("3. [Sospechosos por detección automática](#3-sospechosos-por-detección-automática)\n")
-    md.append("\n**Cómo usar este reporte:**\n")
-    md.append("Leé cada chunk y en `Veredicto del revisor` marcá:")
-    md.append("- `OK` si el chunk se ve bien")
-    md.append("- `PROBLEMA: descripción` si hay algo que arreglar")
+    md.append("2. [Caso conocido](#2-caso-conocido-ordenanza_10328_2014)")
+    md.append("3. [Sospechosos](#3-sospechosos-por-detección-refinada)\n")
     md.append("\n---\n")
 
     md.append("\n## 1. Muestra estratificada por tipo_chunk\n")
@@ -244,20 +277,21 @@ def main():
         md.append(formatear_chunk_md(c, "muestra estratificada aleatoria"))
 
     md.append("\n## 2. Caso conocido: ordenanza_10328_2014\n")
-    md.append("Este documento dispara el filtro de falsos positivos por el caso del Art 73 del Código de Faltas.\n")
-    for c in sorted(caso_conocido, key=lambda x: x["metadata"].get("articulo_num", 0)):
-        md.append(formatear_chunk_md(c, "caso conocido con filtro"))
+    if caso_conocido:
+        for c in sorted(caso_conocido, key=lambda x: x["metadata"].get("articulo_num", 0)):
+            md.append(formatear_chunk_md(c, "caso conocido (falso positivo art 73)"))
+    else:
+        md.append("_(no hay chunks de este doc en el piloto)_\n")
 
-    md.append("\n## 3. Sospechosos por detección automática\n")
-    md.append(f"Top {len(sospechosos_top)} chunks con sospechas automáticas, ordenados por gravedad.\n")
+    md.append("\n## 3. Sospechosos por detección refinada\n")
     for c, razones in sospechosos_top:
         md.append(formatear_chunk_md(c, f"sospechoso: {', '.join(razones)}"))
 
     with open(REPORT_MD, "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
-    # JSON paralelo para uso programatico
     salida_json = {
+        "version": 2,
         "total_chunks_inspeccionados": len(muestra_estratificada) + len(caso_conocido) + len(sospechosos_top),
         "muestra_estratificada_ids": [c["chunk_id"] for c in muestra_estratificada],
         "caso_conocido_ids": [c["chunk_id"] for c in caso_conocido],
@@ -281,26 +315,22 @@ def main():
     print(f"Chunks en muestra estratificada: {len(muestra_estratificada)}")
     print(f"Chunks del caso conocido:        {len(caso_conocido)}")
     print(f"Sospechosos top:                 {len(sospechosos_top)}")
-    print(f"TOTAL A REVISAR:                 {len(muestra_estratificada) + len(caso_conocido) + len(sospechosos_top)}")
+    print(f"TOTAL A REVISAR:                 "
+          f"{len(muestra_estratificada) + len(caso_conocido) + len(sospechosos_top)}")
+    print(f"\nTotal sospechosos: {len(sospechosos)} de {len(all_chunks)}")
+    print(f"  ({round(len(sospechosos)/len(all_chunks)*100,1)}% del piloto)")
 
-    print(f"\nTotal sospechosos detectados en el corpus: {len(sospechosos)} de {len(all_chunks)}")
-    print(f"  ({round(len(sospechosos) / len(all_chunks) * 100, 1)}% del piloto tiene alguna sospecha)")
-
-    # Breakdown de tipos de sospecha
     razones_count = defaultdict(int)
     for _, razones in sospechosos:
         for r in razones:
-            # Normalizar (quitar numeros entre parentesis)
             r_norm = re.sub(r"\([^)]*\)", "", r).strip()
             razones_count[r_norm] += 1
 
-    print(f"\nBreakdown de sospechas (puede haber multiples por chunk):")
+    print(f"\nBreakdown:")
     for razon, n in sorted(razones_count.items(), key=lambda x: -x[1]):
         print(f"  {razon:50}: {n}")
 
-    print(f"\nReporte navegable: {REPORT_MD}")
-    print(f"Estructurado:      {REPORT_JSON}")
-    print(f"\nAbrí el .md en VSCode o cualquier editor markdown y leé chunk por chunk.")
+    print(f"\nReporte: {REPORT_MD}")
 
 
 if __name__ == "__main__":
