@@ -47,6 +47,14 @@ except ImportError:
 # - Capitulo III del Titulo IX (arts. 160-162): Consejo de Planificacion Estrategica
 ARTICULOS_BLINDADOS = {41, 68, 160, 161, 162}
 
+# Configuracion de sub-chunking por inciso para articulos densos.
+# Un articulo es "denso" si supera CUALQUIERA de estos umbrales.
+# Decision basada en audit del corpus: el problema afecta a 6 articulos
+# (8, 10, 13, 15, 45, 72). Articulos con menos incisos (ej. Art. 38 con 7)
+# rinden bien sin sub-chunking en la validacion.
+UMBRAL_INCISOS_PARA_SUBCHUNK = 10
+UMBRAL_CHARS_PARA_SUBCHUNK = 2500
+
 # Mapeo romanos -> numeros (hasta XX, suficiente para esta CO)
 ROMANOS = {
     "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7,
@@ -364,6 +372,89 @@ def extraer_disposiciones_transitorias(texto):
 
 
 # ============================================================
+# DETECCION Y EXTRACCION DE INCISOS
+# ============================================================
+
+PATRON_INCISO = re.compile(r"^\s*(\d{1,2})\.\s+", re.MULTILINE)
+
+
+def detectar_incisos(texto):
+    """
+    Detecta los incisos numerados de un articulo y devuelve sus posiciones.
+
+    Cuenta como inciso solo si los numeros son consecutivos desde 1.
+    Esto evita falsos positivos (ej: "Art. 75 Inciso 17 de la Constitucion").
+
+    Devuelve lista de tuplas (num_inciso, start, end) o [] si no hay incisos.
+    """
+    matches = list(PATRON_INCISO.finditer(texto))
+    if not matches:
+        return []
+
+    # Validar consecutividad desde 1
+    nums = [int(m.group(1)) for m in matches]
+    if 1 not in nums:
+        return []
+
+    # Encontrar la secuencia maxima consecutiva desde 1
+    consec = [matches[nums.index(1)]]
+    siguiente = 2
+    while siguiente in nums:
+        consec.append(matches[nums.index(siguiente)])
+        siguiente += 1
+
+    if len(consec) < 3:
+        # Menos de 3 incisos consecutivos: probablemente no es una enumeracion real
+        return []
+
+    # Construir tuplas con start y end de cada inciso
+    incisos = []
+    for i, m in enumerate(consec):
+        num_inciso = int(m.group(1))
+        start = m.start()
+        if i + 1 < len(consec):
+            end = consec[i + 1].start()
+        else:
+            end = len(texto)
+        incisos.append((num_inciso, start, end))
+
+    return incisos
+
+
+def es_articulo_denso(num_incisos, char_count):
+    """Decide si un articulo requiere sub-chunking por inciso."""
+    return (num_incisos >= UMBRAL_INCISOS_PARA_SUBCHUNK
+            or char_count >= UMBRAL_CHARS_PARA_SUBCHUNK)
+
+
+def extraer_incisos_de_articulo(articulo):
+    """
+    Si el articulo es denso, extrae sus incisos como sub-chunks.
+    Devuelve lista de dicts con num_inciso y texto_inciso, o [] si no aplica.
+    """
+    texto = articulo["texto"]
+    incisos = detectar_incisos(texto)
+    if not incisos:
+        return []
+    if not es_articulo_denso(len(incisos), articulo["char_count"]):
+        return []
+
+    sub_chunks = []
+    # Texto introductorio: lo que esta antes del primer inciso
+    intro_end = incisos[0][1]
+    intro = texto[:intro_end].strip()
+
+    for num_inciso, start, end in incisos:
+        texto_inciso = texto[start:end].strip()
+        sub_chunks.append({
+            "num_inciso": num_inciso,
+            "texto_inciso": texto_inciso,
+            "intro_articulo": intro,
+        })
+    return sub_chunks
+
+
+# ============================================================
 # CONSTRUCCION DE CHUNKS
 # ============================================================
 
@@ -382,9 +473,35 @@ def construir_header_navegacion(parte, titulo, capitulo, seccion):
 
 
 def construir_chunk_preambulo(texto_preambulo):
-    """Construye el chunk del Preambulo."""
+    """
+    Construye el chunk del Preambulo.
+
+    El texto original esta en MAYUSCULAS (estilo ceremonial del PDF).
+    Para el embedding lo normalizamos a "sentence case" porque las
+    mayusculas afectan negativamente la similitud semantica en
+    text-embedding-3-small. El header mantiene el contexto original.
+    """
     header = "[CARTA ORGÁNICA MUNICIPAL > PREÁMBULO]"
-    texto_completo = f"{header}\n\n{texto_preambulo}"
+    # Normalizar a sentence case para mejor embedding
+    # (mantiene las mayusculas originales como capitalizacion de oracion)
+    texto_normalizado = texto_preambulo.lower()
+    # Capitalizar al inicio y despues de . ! ? ;
+    import re as _re_local
+    def _capitalizar(m):
+        return m.group(0).upper()
+    texto_normalizado = _re_local.sub(r"^[a-záéíóúñ]", _capitalizar, texto_normalizado)
+    texto_normalizado = _re_local.sub(r"([.!?;]\s+)([a-záéíóúñ])",
+                                       lambda m: m.group(1) + m.group(2).upper(),
+                                       texto_normalizado)
+    # Nombres propios y siglas tipicas del Preambulo (preservar)
+    nombres_propios = {
+        "san martín de los andes": "San Martín de los Andes",
+        "dios": "Dios",
+    }
+    for original, restaurado in nombres_propios.items():
+        texto_normalizado = texto_normalizado.replace(original, restaurado)
+
+    texto_completo = f"{header}\n\n{texto_normalizado}"
     return {
         "chunk_id": "carta_organica_2010_preambulo",
         "texto": texto_completo,
@@ -442,6 +559,73 @@ def construir_chunk_articulo(articulo):
 
     return {
         "chunk_id": f"carta_organica_2010_art_{num}",
+        "texto": texto_completo,
+        "metadata": metadata,
+    }
+
+
+def construir_chunk_inciso(articulo, sub_chunk):
+    """
+    Construye un chunk para un inciso especifico de un articulo denso.
+
+    El texto incluye:
+      - Header de navegacion jerarquica
+      - Intro del articulo (contexto previo al primer inciso)
+      - El inciso especifico
+
+    El embedding de este chunk se enfoca en el inciso, pero mantiene contexto.
+    """
+    num = articulo["num"]
+    num_inciso = sub_chunk["num_inciso"]
+
+    header = construir_header_navegacion(
+        articulo["parte"], articulo["titulo"],
+        articulo["capitulo"], articulo["seccion"]
+    )
+
+    # Construir texto: header + "Articulo N (inciso M): [intro]\n[texto_inciso]"
+    # El intro del articulo da contexto al inciso (de que esta hablando)
+    texto_completo = (
+        f"{header}\n\n"
+        f"Articulo {num}, inciso {num_inciso}\n\n"
+        f"Contexto del articulo: {sub_chunk['intro_articulo']}\n\n"
+        f"Inciso {num_inciso}: {sub_chunk['texto_inciso']}"
+    )
+
+    refs = extraer_referencias(sub_chunk["texto_inciso"], num)
+
+    metadata = {
+        "doc_id": "carta_organica_2010",
+        "tipo_documento": "carta_organica",
+        "tipo_chunk": "inciso_carta_organica",
+        "fuente": "Carta Organica Municipal SMA - Julio 2010",
+        "anio": 2010,
+        "boletin_oficial": "382",
+        "fecha_publicacion": "2010-11-26",
+        "articulo_num": num,
+        "inciso_num": num_inciso,
+        "es_inciso": True,
+        "char_count": len(texto_completo),
+        "no_modificable_por_enmienda": num in ARTICULOS_BLINDADOS,
+        "referencias_a_articulos": refs,
+    }
+
+    # Heredar metadata jerarquica del articulo padre
+    if articulo["parte"]:
+        metadata["parte_num"] = articulo["parte"]["num"]
+        metadata["parte_nombre"] = articulo["parte"]["nombre"]
+    if articulo["titulo"]:
+        metadata["titulo_num"] = articulo["titulo"]["num"]
+        metadata["titulo_nombre"] = articulo["titulo"]["nombre"]
+    if articulo["capitulo"]:
+        metadata["capitulo_num"] = articulo["capitulo"]["num"]
+        metadata["capitulo_nombre"] = articulo["capitulo"]["nombre"]
+    if articulo["seccion"]:
+        metadata["seccion_num"] = articulo["seccion"]["num"]
+        metadata["seccion_nombre"] = articulo["seccion"]["nombre"]
+
+    return {
+        "chunk_id": f"carta_organica_2010_art_{num}_inc_{num_inciso}",
         "texto": texto_completo,
         "metadata": metadata,
     }
@@ -530,13 +714,29 @@ def main():
     if preambulo:
         chunks.append(construir_chunk_preambulo(preambulo))
 
+    articulos_sub_chunkeados = []
+    total_incisos_generados = 0
     for art in articulos:
+        # Chunk consolidado del articulo completo (siempre)
         chunks.append(construir_chunk_articulo(art))
+
+        # Si es denso, agregar chunks por inciso
+        sub_chunks = extraer_incisos_de_articulo(art)
+        if sub_chunks:
+            articulos_sub_chunkeados.append((art["num"], len(sub_chunks)))
+            total_incisos_generados += len(sub_chunks)
+            for sub in sub_chunks:
+                chunks.append(construir_chunk_inciso(art, sub))
 
     for disp in transitorias:
         chunks.append(construir_chunk_transitoria(disp))
 
     print(f"  Total chunks: {len(chunks)}")
+    print(f"\nSub-chunking por inciso:")
+    print(f"  Articulos sub-chunkeados: {len(articulos_sub_chunkeados)}")
+    print(f"  Chunks de inciso generados: {total_incisos_generados}")
+    for art_num, n_incisos in articulos_sub_chunkeados:
+        print(f"    Art. {art_num}: {n_incisos} incisos")
 
     # Estadisticas
     char_counts = [c["metadata"]["char_count"] for c in chunks]
