@@ -31,15 +31,181 @@ TAM_CHUNK_FALLBACK = 1_500
 OVERLAP_FALLBACK = 200
 
 
+def _build_link_original(metadata: dict) -> dict:
+    """
+    Construye el link al original (HTML del Digesto viejo o PDF del nuevo)
+    segun el url_origen del documento. Para la UI.
+
+    Devuelve {url, tipo} donde tipo es 'html_viejo', 'pdf_nuevo' o 'sin_link'.
+    """
+    url = metadata.get("url_origen") or ""
+    if "digesto.cdsma.gob.ar/normas/" in url:
+        return {"url": url, "tipo": "pdf_nuevo"}
+    if "digeh.cdsma.gob.ar" in url:
+        return {"url": url, "tipo": "html_viejo"}
+    return {"url": "", "tipo": "sin_link"}
+
+
+def _chunkear_anexo_con_articulos(anexo, doc_id, meta_base, link_original):
+    """
+    Procesa un anexo que tiene contenido real, detectando si tiene articulos
+    propios internos.
+
+    - Si el anexo tiene articulos -> 1 chunk por articulo con chunk_id
+      jerarquico: doc_id + _anexo_N + _art_M
+    - Si NO tiene articulos -> chunk(s) por caracteres del anexo entero
+      (mismo comportamiento que el chunker original)
+    """
+    texto_anexo = anexo["texto"]
+    anexo_num = anexo["num"]
+    anexo_id = f"{doc_id}_anexo_{anexo_num}"
+
+    # Intentar detectar articulos DENTRO del anexo
+    articulos_internos = extract_articles(texto_anexo)
+    articulos_internos, _ = filtrar_falsos_positivos(articulos_internos)
+
+    chunks = []
+    meta_anexo_base = {
+        **meta_base,
+        "anexo_num": anexo_num,
+        "anexo_label": anexo["label"],
+        "chunk_id_padre": doc_id,
+        "link_original_url": link_original["url"],
+        "link_original_tipo": link_original["tipo"],
+    }
+
+    if articulos_internos:
+        # El anexo tiene articulos propios: 1 chunk por articulo
+        for art in articulos_internos:
+            texto_art = art["texto"]
+            num = art["num"]
+
+            if len(texto_art) <= UMBRAL_ARTICULO_LARGO:
+                chunks.append({
+                    "chunk_id": f"{anexo_id}_art_{num}",
+                    "texto": texto_art,
+                    "metadata": {
+                        **meta_anexo_base,
+                        "tipo_chunk": "articulo_anexo",
+                        "articulo_num": num,
+                        "char_count": len(texto_art),
+                        "chunk_id_anexo_padre": anexo_id,
+                    },
+                })
+            else:
+                sub_chunks = _chunk_por_caracteres(
+                    texto_art, TAM_CHUNK_FALLBACK, OVERLAP_FALLBACK
+                )
+                for idx, sub in enumerate(sub_chunks, start=1):
+                    chunks.append({
+                        "chunk_id": f"{anexo_id}_art_{num}_part_{idx}",
+                        "texto": sub,
+                        "metadata": {
+                            **meta_anexo_base,
+                            "tipo_chunk": "articulo_anexo_largo_parte",
+                            "articulo_num": num,
+                            "parte": idx,
+                            "char_count": len(sub),
+                            "chunk_id_anexo_padre": anexo_id,
+                        },
+                    })
+    else:
+        # El anexo NO tiene articulos: chunkear por caracteres como antes
+        if len(texto_anexo) <= UMBRAL_ARTICULO_LARGO:
+            chunks.append({
+                "chunk_id": anexo_id,
+                "texto": texto_anexo,
+                "metadata": {
+                    **meta_anexo_base,
+                    "tipo_chunk": "anexo",
+                    "articulo_num": None,
+                    "char_count": len(texto_anexo),
+                },
+            })
+        else:
+            sub_chunks = _chunk_por_caracteres(
+                texto_anexo, TAM_CHUNK_FALLBACK, OVERLAP_FALLBACK
+            )
+            for idx, sub in enumerate(sub_chunks, start=1):
+                chunks.append({
+                    "chunk_id": f"{anexo_id}_part_{idx}",
+                    "texto": sub,
+                    "metadata": {
+                        **meta_anexo_base,
+                        "tipo_chunk": "anexo_parte",
+                        "articulo_num": None,
+                        "parte": idx,
+                        "char_count": len(sub),
+                    },
+                })
+
+    return chunks
+
+
+def _chunk_marker_anexo_vacio(anexo, doc_id, meta_base, link_original):
+    """
+    Construye un chunk marker para un anexo que existe formalmente pero
+    no tiene texto digitalizado (PDF adjunto en el original).
+
+    El texto del chunk es informativo y embebible. La UI puede mostrar
+    un link al original cuando este chunk aparece en resultados.
+    """
+    anexo_num = anexo["num"]
+    tipo_norma = meta_base.get("tipo_norma", "norma")
+    numero = meta_base.get("numero", "?")
+    anio = meta_base.get("anio", "?")
+
+    texto = (
+        f"Anexo {anexo_num} de {tipo_norma} N° {numero}/{anio}. "
+        f"El contenido de este anexo no se encuentra digitalizado en el texto "
+        f"de la norma. Ver documento original para acceder al anexo completo."
+    )
+
+    return {
+        "chunk_id": f"{doc_id}_anexo_{anexo_num}",
+        "texto": texto,
+        "metadata": {
+            **meta_base,
+            "tipo_chunk": "anexo_vacio",
+            "anexo_num": anexo_num,
+            "anexo_label": anexo["label"],
+            "articulo_num": None,
+            "char_count": len(texto),
+            "es_anexo_vacio": True,
+            "chunk_id_padre": doc_id,
+            "link_original_url": link_original["url"],
+            "link_original_tipo": link_original["tipo"],
+        },
+    }
+
+
 def _build_doc_id(metadata: dict) -> str:
+    """
+    Construye el doc_id usado como prefijo de todos los chunk_ids.
+
+    Estrategia:
+      1. Si tiene tipo+numero+anio Y unid: usar tipo_numero_anio_uXXXXX
+         (5 chars del UNID discriminan colisiones del corpus, hay 7 casos
+         reales de ordenanzas distintas con mismo numero+anio).
+      2. Si tiene tipo+numero+anio sin unid: usar tipo_numero_anio
+         (las 14 normas del scraper nuevo son unicas por construccion).
+      3. Si solo tiene unid: usar unid_xxx.
+      4. Fallback: doc_desconocido.
+
+    Determinismo garantizado: mismo archivo -> mismo doc_id siempre.
+    """
     tipo = metadata.get("tipo_norma")
     numero = metadata.get("numero")
     anio = metadata.get("anio")
+    unid = metadata.get("unid")
 
     if tipo and numero and anio:
+        if unid:
+            # Sufijo de 5 chars hex del UNID para discriminar colisiones
+            sufijo = unid[:5].lower()
+            return f"{tipo}_{numero}_{anio}_u{sufijo}"
         return f"{tipo}_{numero}_{anio}"
 
-    unid = metadata.get("unid")
     if unid:
         return f"unid_{unid[:12].lower()}"
 
@@ -110,6 +276,42 @@ def _chunkear_anexo(anexo: dict, doc_id: str, meta_base: dict) -> list[dict]:
     return chunks
 
 
+def _post_procesar_chunks(chunks: list) -> list:
+    """
+    Post-procesa la lista de chunks antes de retornar:
+
+      1. Filtra chunks con texto vacio (no embebibles).
+      2. Deduplica chunk_ids agregando sufijo __N a variantes residuales.
+         Preserva chunk_id_original en metadata para trazabilidad UI.
+
+    Estas dos correcciones son seguras y no alteran chunks bien formados.
+    """
+    if not chunks:
+        return chunks
+
+    # 1. Descartar chunks con texto vacio
+    chunks_validos = [c for c in chunks if c.get("texto", "").strip()]
+
+    # 2. Deduplicar chunk_ids residuales
+    vistos = {}
+    for c in chunks_validos:
+        cid = c.get("chunk_id")
+        if not cid:
+            continue
+        if cid not in vistos:
+            vistos[cid] = 1
+        else:
+            vistos[cid] += 1
+            nuevo_id = f"{cid}__{vistos[cid]}"
+            if "metadata" not in c:
+                c["metadata"] = {}
+            c["metadata"]["chunk_id_original"] = cid
+            c["metadata"]["es_variante_chunk_id"] = True
+            c["chunk_id"] = nuevo_id
+
+    return chunks_validos
+
+
 def chunk_document(filepath, verbose=False):
     """
     Recibe la ruta a un .txt del Digesto y devuelve una lista de chunks
@@ -150,7 +352,7 @@ def chunk_document(filepath, verbose=False):
                 "char_count": len(cuerpo),
             },
         })
-        return chunks
+        return _post_procesar_chunks(chunks)
 
     # --- Extraccion de articulos y anexos (independientemente) ---
     articulos = extract_articles(cuerpo)
@@ -165,7 +367,23 @@ def chunk_document(filepath, verbose=False):
 
     # --- CAMINO 2: doc con articulos y/o anexos ---
     if articulos or anexos:
-        # Primero los articulos (orden natural del documento)
+        # FIX ARQUITECTONICO: separar cuerpo principal de anexos ANTES de procesar.
+        # extract_articles() previamente corria sobre el cuerpo COMPLETO incluyendo
+        # los textos de anexos, lo que causaba chunk_id duplicados (719 colisiones
+        # en el corpus). Ahora cortamos por la posicion del primer anexo y
+        # procesamos cuerpo principal y anexos por separado.
+
+        link_original = _build_link_original(metadata)
+
+        if anexos:
+            # Cortar cuerpo principal en la posicion del primer anexo
+            pos_primer_anexo = min(a["start"] for a in anexos)
+            cuerpo_principal = cuerpo[:pos_primer_anexo]
+            # Re-extraer articulos solo del cuerpo principal
+            articulos = extract_articles(cuerpo_principal)
+            articulos, _ = filtrar_falsos_positivos(articulos)
+
+        # Procesar articulos del cuerpo principal (chunk_ids iguales a antes)
         for art in articulos:
             texto_art = art["texto"]
             num = art["num"]
@@ -179,6 +397,9 @@ def chunk_document(filepath, verbose=False):
                         "tipo_chunk": "articulo",
                         "articulo_num": num,
                         "char_count": len(texto_art),
+                        "chunk_id_padre": doc_id,
+                        "link_original_url": link_original["url"],
+                        "link_original_tipo": link_original["tipo"],
                     },
                 })
             else:
@@ -195,14 +416,26 @@ def chunk_document(filepath, verbose=False):
                             "articulo_num": num,
                             "parte": idx,
                             "char_count": len(sub),
+                            "chunk_id_padre": doc_id,
+                            "link_original_url": link_original["url"],
+                            "link_original_tipo": link_original["tipo"],
                         },
                     })
 
-        # Despues los anexos (orden natural: I, II, III...)
+        # Procesar anexos (orden natural: I, II, III...)
         for anexo in anexos:
-            chunks.extend(_chunkear_anexo(anexo, doc_id, meta_base))
+            if anexo.get("estado_contenido") == "vacio":
+                # Anexo sin contenido digitalizado: marker con link al original
+                chunks.append(
+                    _chunk_marker_anexo_vacio(anexo, doc_id, meta_base, link_original)
+                )
+            else:
+                # Anexo real con contenido: detectar articulos internos
+                chunks.extend(
+                    _chunkear_anexo_con_articulos(anexo, doc_id, meta_base, link_original)
+                )
 
-        return chunks
+        return _post_procesar_chunks(chunks)
 
     # --- CAMINO 3: doc largo sin articulos NI anexos -> chunking por caracteres ---
     sub_chunks = _chunk_por_caracteres(cuerpo, TAM_CHUNK_FALLBACK, OVERLAP_FALLBACK)
@@ -219,7 +452,7 @@ def chunk_document(filepath, verbose=False):
             },
         })
 
-    return chunks
+    return _post_procesar_chunks(chunks)
 
 
 if __name__ == "__main__":

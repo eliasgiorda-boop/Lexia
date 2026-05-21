@@ -45,6 +45,46 @@ def _romano_a_int(romano: str) -> int:
     return total
 
 
+# Palabras en minuscula que indican que "ANEXO I" es mencion embebida
+# en una oracion (falso positivo).
+_PALABRAS_CONTINUACION_ORACION = {
+    "que", "el", "la", "los", "las", "de", "del",
+    "se", "su", "sus", "esta", "este", "estos", "estas",
+    "forma", "es", "por", "como",
+}
+
+# Umbral minimo de chars utiles para considerar que un anexo tiene contenido real.
+# Si tiene menos que esto, se marca como "vacio" (existe formalmente pero
+# no esta digitalizado).
+UMBRAL_ANEXO_VACIO = 30
+
+
+def _clasificar_anexo(texto_anexo: str, palabra_siguiente: str) -> dict:
+    """
+    Clasifica un match de 'ANEXO N' en una de tres categorias:
+      - 'falso_positivo': es una mencion embebida en oracion
+      - 'vacio': es anexo real pero sin contenido digitalizado
+      - 'real': es anexo real con contenido normativo
+
+    Devuelve {clase, motivo}.
+    """
+    palabra_norm = palabra_siguiente.lower().strip(".,:;-")
+
+    # Regla 1: si la siguiente palabra es continuacion de oracion -> falso positivo
+    if palabra_norm in _PALABRAS_CONTINUACION_ORACION:
+        return {"clase": "falso_positivo",
+                "motivo": f"continuacion oracion ('{palabra_norm}')"}
+
+    # Regla 2: si no hay contenido o es minimo -> anexo vacio (legitimo pero sin texto)
+    texto_util = texto_anexo.strip()
+    if len(texto_util) < UMBRAL_ANEXO_VACIO:
+        return {"clase": "vacio",
+                "motivo": f"contenido digitalizado < {UMBRAL_ANEXO_VACIO} chars"}
+
+    # Regla 3: anexo real con contenido
+    return {"clase": "real", "motivo": "contenido normativo presente"}
+
+
 def extraer_anexos(cuerpo_limpio: str) -> list:
     """
     Detecta y devuelve los anexos del documento.
@@ -88,6 +128,15 @@ def extraer_anexos(cuerpo_limpio: str) -> list:
 
         texto = cuerpo_limpio[contenido_start:end].strip()
 
+        # Clasificar este match: real, vacio o falso positivo
+        palabra_siguiente_lst = texto.strip().split(maxsplit=1)
+        palabra_siguiente = palabra_siguiente_lst[0] if palabra_siguiente_lst else ""
+        clasificacion = _clasificar_anexo(texto, palabra_siguiente)
+
+        if clasificacion["clase"] == "falso_positivo":
+            # Descartamos: NO es un anexo, es una mencion embebida
+            continue
+
         anexos.append({
             "num": num_romano,
             "num_int": _romano_a_int(num_romano),
@@ -96,6 +145,9 @@ def extraer_anexos(cuerpo_limpio: str) -> list:
             "start": start,
             "end": end,
             "char_count": end - start,
+            "tiene_contenido": clasificacion["clase"] == "real",
+            "estado_contenido": clasificacion["clase"],  # 'real' o 'vacio'
+            "motivo_clasificacion": clasificacion["motivo"],
         })
 
     return anexos
