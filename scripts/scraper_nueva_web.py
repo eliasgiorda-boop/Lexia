@@ -45,7 +45,10 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 # Agregar src al path para poder importar chunker
 SCRIPT_DIR = Path(__file__).parent
@@ -74,7 +77,7 @@ ENDPOINT_LISTA = BASE_URL + "/consulta-digesto"
 ENDPOINT_STATUTES = BASE_URL + "/get-statutes"
 PDF_URL_TEMPLATE = BASE_URL + "/normas/{id}.pdf"
 
-CORPUS_DIR = Path(r"E:\Bosio\Normativa Total\Por Tipo Normativa")
+CORPUS_DIR = Path(os.getenv("CORPUS_PATH", "."))
 FALLIDOS_DIR = PROJECT_ROOT / "data" / "_scraper_fallidos"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 digesto-search-scraper/1.0"
 

@@ -22,7 +22,10 @@ Salidas:
 """
 import json
 import sys
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -32,7 +35,7 @@ from derogation_from_filename import detectar_derogados_por_filename
 
 
 AUDIT_DIR = PROJECT_ROOT / "data" / "_audit"
-CORPUS_DIR = Path(r"E:\Bosio\Normativa Total\Por Tipo Normativa")
+CORPUS_DIR = Path(os.getenv("CORPUS_PATH", "."))
 DEROGATIONS_TEXTO_PATH = AUDIT_DIR / "_audit_derogations.json"
 OUTPUT_PATH = AUDIT_DIR / "_derogations_unified.json"
 

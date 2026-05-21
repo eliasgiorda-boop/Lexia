@@ -17,7 +17,10 @@ import json
 import sys
 import traceback
 from collections import defaultdict
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 from time import time
 
 SCRIPT_DIR = Path(__file__).parent
@@ -28,7 +31,7 @@ from chunker import chunk_document
 from derogation_detector import detectar_derogaciones_totales
 
 
-CORPUS_DIR = Path(r"E:\Bosio\Normativa Total\Por Tipo Normativa")
+CORPUS_DIR = Path(os.getenv("CORPUS_PATH", "."))
 OUTPUT_DIR = PROJECT_ROOT / "data" / "_audit"
 STATS_PATH = OUTPUT_DIR / "_audit_stats.json"
 ERRORS_PATH = OUTPUT_DIR / "_audit_errors.log"

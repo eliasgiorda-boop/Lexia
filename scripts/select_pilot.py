@@ -20,12 +20,15 @@ import random
 import re
 import shutil
 from collections import defaultdict
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # === CONFIGURACION ===
 
-CORPUS_DIR = Path(r"E:\Bosio\Normativa Total\Por Tipo Normativa")
+CORPUS_DIR = Path(os.getenv("CORPUS_PATH", "."))
 OUTPUT_DIR = Path("data/samples/pilot")
 MANIFEST_PATH = OUTPUT_DIR / "_manifest.json"
 SEED = 42

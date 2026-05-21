@@ -22,11 +22,14 @@ USO:
 import json
 import re
 import sys
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-PDF_PATH = Path(r"E:\Bosio\Normativa Total\carta-organica-municipal.pdf")
+PDF_PATH = Path(os.getenv("CARTA_ORGANICA_PATH", "."))
 OUTPUT_DIR = PROJECT_ROOT / "data" / "carta_organica"
 
 try:

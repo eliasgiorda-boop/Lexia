@@ -25,9 +25,12 @@ USO:
   python scripts/build_index_corpus.py --batch-size 200
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -38,7 +41,7 @@ from derogation_from_filename import es_derogada_por_filename
 from embedder import embed_texts, estimar_costo_usd, estimar_tokens, MODEL_NAME
 from indexer import get_collection, upsert_chunks
 
-CORPUS_ROOT = Path(r"E:\Bosio\Normativa Total\Por Tipo Normativa")
+CORPUS_ROOT = Path(os.getenv("CORPUS_PATH", "."))
 
 
 def listar_archivos_corpus():
