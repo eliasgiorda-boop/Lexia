@@ -49,7 +49,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 load_dotenv(PROJECT_ROOT / ".env")
 
-MODEL_NAME = "gpt-4.1"
+MODEL_NAME = os.getenv("LLM_MODEL", "gpt-4.1")
 PRICE_INPUT_PER_1M = 2.00    # USD por 1M tokens input (verificado may-2026)
 PRICE_OUTPUT_PER_1M = 8.00   # USD por 1M tokens output
 MAX_RETRIES = 4
