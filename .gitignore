@@ -49,3 +49,6 @@ data/carta_organica/
 config.yaml
 _gen_hashes.py
 *.db
+
+# Excepcion: requirements.txt SI debe versionarse
+!requirements.txt
