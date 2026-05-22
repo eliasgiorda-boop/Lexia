@@ -1,0 +1,17 @@
+# Plantilla de configuracion del login. Copiar a config.yaml y completar.
+# El config.yaml real NUNCA se sube (esta en .gitignore): tiene hashes y cookie key.
+# Los hashes se generan con streamlit-authenticator (ver _gen_hashes.py).
+credentials:
+  usernames:
+    usuario1:
+      email: usuario1@ejemplo.com
+      name: Nombre Usuario 1
+      password: HASH_BCRYPT_ACA
+    usuario2:
+      email: usuario2@ejemplo.com
+      name: Nombre Usuario 2
+      password: HASH_BCRYPT_ACA
+cookie:
+  name: lexia_auth
+  key: STRING_ALEATORIO_LARGO_64_CHARS
+  expiry_days: 7

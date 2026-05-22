@@ -44,3 +44,8 @@ logs/
 
 
 data/carta_organica/
+
+# Secretos del login y temporales
+config.yaml
+_gen_hashes.py
+*.db
