@@ -1,14 +1,20 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
 import requests
 import yaml
 import streamlit as st
 import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
+from history import init_db, guardar_consulta, obtener_historial
 
 API_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="Lexia", page_icon="L", layout="centered")
 
-# --- Cargar config y autenticador ---
+init_db()
+
 with open("config.yaml", encoding="utf-8") as f:
     config = yaml.load(f, Loader=SafeLoader)
 
@@ -19,9 +25,7 @@ authenticator = stauth.Authenticate(
     config["cookie"]["expiry_days"],
 )
 
-# --- Pantalla de login (API 0.4.x: escribe en session_state) ---
 authenticator.login(location="main")
-
 auth_status = st.session_state.get("authentication_status")
 
 if auth_status is False:
@@ -31,8 +35,8 @@ elif auth_status is None:
     st.warning("Por favor ingresa tus credenciales.")
     st.stop()
 
-# --- A partir de aca: usuario autenticado ---
 nombre = st.session_state.get("name", "")
+username = st.session_state.get("username", "")
 
 st.markdown(
     """
@@ -64,18 +68,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- Sidebar: saludo y logout ---
+# --- Sidebar: sesion, logout, historial ---
 with st.sidebar:
     st.markdown("Sesion: **" + nombre + "**")
     authenticator.logout("Cerrar sesion", location="sidebar")
+    st.divider()
+    st.markdown("**Historial**")
+    historial = obtener_historial(username)
+    if not historial:
+        st.caption("Sin consultas aun.")
+    else:
+        for i, h in enumerate(historial):
+            if st.button(h["query"], key="hist_" + str(i), use_container_width=True):
+                st.session_state["query_pendiente"] = h["query"]
+                st.rerun()
 
 st.title("Lexia")
 st.caption("Asistente normativo - San Martin de los Andes")
 
-query = st.text_input("Consulta", placeholder="Ej: como se regula la Banca del Vecino", label_visibility="collapsed")
+# Si se clickeo una consulta del historial, precargarla
+valor_inicial = st.session_state.pop("query_pendiente", "")
+query = st.text_input("Consulta", value=valor_inicial, placeholder="Ej: como se regula la Banca del Vecino", label_visibility="collapsed")
 buscar = st.button("Buscar", type="primary")
 
-if buscar and query.strip():
+# Disparar busqueda si: se apreto Buscar, o vino una consulta precargada del historial
+ejecutar = (buscar and query.strip()) or (valor_inicial and query.strip())
+
+if ejecutar:
     with st.spinner("Buscando en la normativa..."):
         try:
             resp = requests.post(
@@ -91,6 +110,8 @@ if buscar and query.strip():
         except Exception as e:
             st.error("Error al consultar: " + str(e))
             st.stop()
+
+    guardar_consulta(username, query)
 
     st.markdown(data["respuesta"])
 
@@ -108,7 +129,7 @@ if buscar and query.strip():
         st.markdown('<div class=\"fuente-card\"><b>[' + str(num) + ']</b> ' + cuerpo + derog + '</div>', unsafe_allow_html=True)
 
     uso = data.get("uso", {})
-    st.caption("Modelo: " + str(data.get("modelo","")) + " | chunks: " + str(data.get("chunks_usados",0)) + " | costo: U\ " + format(uso.get("costo_usd",0), ".4f"))
+    st.caption("Modelo: " + str(data.get("modelo","")) + " | chunks: " + str(data.get("chunks_usados",0)) + " | costo: U " + format(uso.get("costo_usd",0), ".4f"))
 
 elif buscar:
     st.warning("Escribi una consulta primero.")
