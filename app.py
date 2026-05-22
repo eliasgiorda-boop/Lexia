@@ -1,17 +1,45 @@
 import requests
+import yaml
 import streamlit as st
+import streamlit_authenticator as stauth
+from yaml.loader import SafeLoader
 
 API_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="Lexia", page_icon="L", layout="centered")
+
+# --- Cargar config y autenticador ---
+with open("config.yaml", encoding="utf-8") as f:
+    config = yaml.load(f, Loader=SafeLoader)
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+# --- Pantalla de login (API 0.4.x: escribe en session_state) ---
+authenticator.login(location="main")
+
+auth_status = st.session_state.get("authentication_status")
+
+if auth_status is False:
+    st.error("Usuario o contrasena incorrectos.")
+    st.stop()
+elif auth_status is None:
+    st.warning("Por favor ingresa tus credenciales.")
+    st.stop()
+
+# --- A partir de aca: usuario autenticado ---
+nombre = st.session_state.get("name", "")
 
 st.markdown(
     """
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .block-container {padding-top: 3rem;}
+    .block-container {padding-top: 2rem;}
     h1 {color: #4ade80; font-weight: 700; letter-spacing: -1px;}
     .fuente-card {
         background: #16241d;
@@ -35,6 +63,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# --- Sidebar: saludo y logout ---
+with st.sidebar:
+    st.markdown("Sesion: **" + nombre + "**")
+    authenticator.logout("Cerrar sesion", location="sidebar")
 
 st.title("Lexia")
 st.caption("Asistente normativo - San Martin de los Andes")
@@ -66,23 +99,22 @@ if buscar and query.strip():
     for f in data["fuentes"]:
         cita = f.get("cita", "Sin cita")
         link = f.get("link", "")
-        derog = '<span class="derogada"> DEROGADA</span>' if f.get("es_derogada") else ""
+        derog = '<span class=\"derogada\"> DEROGADA</span>' if f.get("es_derogada") else ""
         num = f.get("numero", "")
         if link:
-            cuerpo = '<a href="' + link + '" target="_blank">' + cita + '</a>'
+            cuerpo = '<a href=\"' + link + '\" target=\"_blank\">' + cita + '</a>'
         else:
             cuerpo = cita
-        st.markdown('<div class="fuente-card"><b>[' + str(num) + ']</b> ' + cuerpo + derog + '</div>', unsafe_allow_html=True)
+        st.markdown('<div class=\"fuente-card\"><b>[' + str(num) + ']</b> ' + cuerpo + derog + '</div>', unsafe_allow_html=True)
 
     uso = data.get("uso", {})
-    st.caption("Modelo: " + str(data.get("modelo","")) + " | chunks: " + str(data.get("chunks_usados",0)) + " | costo: U$S " + format(uso.get("costo_usd",0), ".4f"))
+    st.caption("Modelo: " + str(data.get("modelo","")) + " | chunks: " + str(data.get("chunks_usados",0)) + " | costo: U\ " + format(uso.get("costo_usd",0), ".4f"))
 
 elif buscar:
     st.warning("Escribi una consulta primero.")
 
-# Pie fijo: visible siempre, con o sin busqueda
 st.markdown(
-    '<div class="pie-fijo">Lexia (beta) &middot; Powered by GPT-4.1 &middot; '
+    '<div class=\"pie-fijo\">Lexia (beta) &middot; Powered by GPT-4.1 &middot; '
     'Herramienta orientativa, no constituye asesoramiento legal &middot; '
     'Verifica contra el texto oficial vigente</div>',
     unsafe_allow_html=True,
